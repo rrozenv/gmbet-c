@@ -32,6 +32,7 @@ import {
   TubeGeometry,
   Vector3,
   WebGLRenderer,
+  WebGLRenderTarget,
 } from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { HDRLoader } from "three/examples/jsm/loaders/HDRLoader.js";
@@ -511,6 +512,40 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
   let envReady = false;
   let boardReady = false;
   let boardRequested = false;
+  let gltfRoot = null;
+  let warming = false;
+  // Compile the board's shaders off the main thread and upload its textures in idle time, before it can appear.
+  const warm = async () => {
+    if (warming || !envReady || !gltfRoot) return;
+    warming = true;
+    boardRoot.visible = true;
+    const compiling = renderer.compileAsync(scene, camera).catch(() => {});
+    boardRoot.visible = false;
+    await compiling;
+    const maps = new Set();
+    gltfRoot.traverse((o) => {
+      if (!o.isMesh) return;
+      ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap"].forEach((k) => o.material[k] && maps.add(o.material[k]));
+    });
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 16));
+    for (const m of maps) {
+      await new Promise((r) => idle(r, { timeout: 200 }));
+      renderer.initTexture(m);
+    }
+    // One offscreen render compiles the shadow and depth programs while nothing is moving.
+    await new Promise((r) => idle(r, { timeout: 300 }));
+    const rt = new WebGLRenderTarget(64, 64);
+    boardRoot.visible = true;
+    renderer.shadowMap.needsUpdate = true;
+    renderer.setRenderTarget(rt);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    boardRoot.visible = false;
+    rt.dispose();
+    shadowKey = "";
+    boardReady = true;
+    onBoardReady && onBoardReady();
+  };
   const loadBoard = () => {
     if (boardRequested) return;
     boardRequested = true;
@@ -521,6 +556,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
       scene.environment = env;
       scene.environmentIntensity = 0.32;
       envReady = true;
+      warm();
     });
 
     const gltf = new GLTFLoader();
@@ -596,9 +632,8 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
       pieces.kingPivot = pivot;
 
       boardRoot.add(root);
-      boardReady = true;
-      boardRoot.visible = true;
-      onBoardReady && onBoardReady();
+      gltfRoot = root;
+      warm();
     });
   };
   if (still) loadBoard();
