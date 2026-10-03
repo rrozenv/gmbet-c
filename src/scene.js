@@ -542,6 +542,12 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
     renderer.setRenderTarget(null);
     boardRoot.visible = false;
     rt.dispose();
+    if (tier >= 2) {
+      // Depth of field switches on mid-scroll; compile its passes now.
+      dofPass.enabled = true;
+      composer.render(0);
+      dofPass.enabled = false;
+    }
     shadowKey = "";
     boardReady = true;
     onBoardReady && onBoardReady();
@@ -704,7 +710,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
   /* Post-processing: depth of field, bloom, filmic tone mapping, vignette, grain. */
   const composer = new EffectComposer(renderer, { frameBufferType: HalfFloatType, multisampling: mobileGPU ? 0 : 4 });
   composer.addPass(new RenderPass(scene, camera));
-  const dof = new DepthOfFieldEffect(camera, { focusDistance: 1, focusRange: 0.1, bokehScale: 0, resolutionScale: mobileGPU ? 0.5 : 0.75 });
+  const dof = new DepthOfFieldEffect(camera, { focusDistance: 1, focusRange: 0.1, bokehScale: 0, resolutionScale: 0.5 });
   const dofTarget = new Vector3();
   dof.target = dofTarget;
   const bloom = new BloomEffect({ mipmapBlur: true, luminanceThreshold: 0.86, luminanceSmoothing: 0.2, intensity: 1.0, radius: 0.75 });
@@ -721,7 +727,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
     state.w = Math.max(1, Math.round(r.width));
     state.h = Math.max(1, Math.round(r.height));
     state.mobile = state.w < 820;
-    state.dpr = Math.min(window.devicePixelRatio || 1, mobileGPU ? 1.5 : 1.75);
+    state.dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     renderer.setPixelRatio(state.dpr);
     renderer.setSize(state.w, state.h, false);
     composer.setSize(state.w, state.h, false);
