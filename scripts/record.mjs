@@ -55,6 +55,13 @@ async function stills(name, viewport, dpr, mobile) {
   for (const id of ["how", "friends", "join"]) {
     await page.evaluate((id) => (window.lenis ? window.lenis.scrollTo("#" + id, { immediate: true }) : document.getElementById(id).scrollIntoView()), id);
     await page.waitForTimeout(700);
+    if (id === "how") {
+      await page.fill("#cc-user", "hikaru");
+      await page.click(".lookup button");
+      await page.waitForSelector(".me, .lookup-msg.err", { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      if (mobile) await page.locator(".lookup").scrollIntoViewIfNeeded();
+    }
     await page.screenshot({ path: `${out}/${name}-0${["how", "friends", "join"].indexOf(id) + 8}-${id}.png` });
   }
   await page.fill('input[name="email"]', "you@example.com");
@@ -79,37 +86,28 @@ async function recording(name, viewport) {
   await page.waitForTimeout(6500);
   const start = (Date.now() - t0) / 1000;
   // 1 s on the turning globe, 11.5 s through the dive (25 beats), 2.5 s across the sections to the waitlist.
-  const fps = await page.evaluate(
-    () =>
-      new Promise((resolve) => {
-        const d = document.getElementById("dive");
-        const span = d.offsetHeight - window.innerHeight;
-        const diveTop = d.offsetTop;
-        const diveEnd = diveTop + span;
-        const joinTop = document.getElementById("join").offsetTop;
-        const t0 = performance.now();
-        let frames = 0;
-        const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-        const step = (now) => {
-          const t = (now - t0) / 1000;
-          frames += 1;
-          let y = 0;
-          if (t < 1) y = 0;
-          else if (t < 12.5) y = diveTop + (diveEnd - diveTop) * ((t - 1) / 11.5);
-          else y = diveEnd + (joinTop - diveEnd) * ease(Math.min(1, (t - 12.5) / 2.5));
-          window.lenis.scrollTo(y, { immediate: true });
-          if (t < 15.2) requestAnimationFrame(step);
-          else resolve(frames / t);
-        };
-        requestAnimationFrame(step);
-      }),
-  );
-  await page.waitForTimeout(300);
+  const geo = await page.evaluate(() => {
+    const d = document.getElementById("dive");
+    return { diveTop: d.offsetTop, diveEnd: d.offsetTop + d.offsetHeight - window.innerHeight, joinTop: document.getElementById("join").offsetTop };
+  });
+  const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  const s0 = Date.now();
+  for (;;) {
+    const t = (Date.now() - s0) / 1000;
+    if (t > 15.2) break;
+    let y = 0;
+    if (t < 1) y = 0;
+    else if (t < 12.5) y = geo.diveTop + (geo.diveEnd - geo.diveTop) * ((t - 1) / 11.5);
+    else y = geo.diveEnd + (geo.joinTop - geo.diveEnd) * ease(Math.min(1, (t - 12.5) / 2.5));
+    await page.evaluate((y) => (window.lenis ? window.lenis.scrollTo(y, { immediate: true }) : window.scrollTo(0, y)), y);
+    await page.waitForTimeout(16);
+  }
+  const fps = 0;
   await ctx.close();
   const webm = readdirSync(dir).find((f) => f.endsWith(".webm"));
   const mp4 = `${out}/${name}-scroll-15s.mp4`;
   execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-ss", start.toFixed(2), "-t", "15", "-i", `${dir}/${webm}`, "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", mp4]);
-  console.log(name, "recording:", mp4, "page fps during scroll:", fps.toFixed(1));
+  console.log(name, "recording:", mp4);
 }
 
 if (only === "all" || only === "stills") {

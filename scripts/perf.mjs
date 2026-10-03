@@ -86,19 +86,34 @@ const stats = await page.evaluate(
 );
 await cdp.send("Tracing.end");
 await done;
+
+// Interaction latency (Event Timing) under the same throttling: lookup, checkbox, and form typing.
+await page.evaluate(() => {
+  window.__events = [];
+  new PerformanceObserver((l) => l.getEntries().forEach((e) => e.interactionId && window.__events.push({ name: e.name, d: e.duration }))).observe({ type: "event", durationThreshold: 16, buffered: false });
+  window.lenis ? window.lenis.scrollTo("#how", { immediate: true }) : document.getElementById("how").scrollIntoView();
+});
+await page.waitForTimeout(600);
+const tap = (sel) => (phone ? page.tap(sel) : page.click(sel));
+await tap("#cc-user");
+await page.keyboard.type("hikaru", { delay: 60 });
+await tap(".lookup button");
+await page.waitForSelector(".me, .lookup-msg", { timeout: 15000 }).catch(() => {});
+await page.waitForTimeout(1500);
+const lookupOk = await page.evaluate(() => !!document.querySelector(".me .me-ready"));
+await page.evaluate(() => (window.lenis ? window.lenis.scrollTo("#join", { immediate: true }) : document.getElementById("join").scrollIntoView()));
+await page.waitForTimeout(500);
+await tap('.role input[value="team"]');
+await tap('input[name="email"]');
+await page.keyboard.type("perf@example.com", { delay: 40 });
+await page.waitForTimeout(800);
+const events = await page.evaluate(() => window.__events);
+const inpMs = events.length ? Math.max(...events.map((e) => e.d)) : 0;
 const tierAfter = await page.evaluate(() => document.querySelector("[data-stage]").dataset.tier);
 
-// Frames the compositor reports as dropped (PipelineReporter states).
-const states = {};
-for (const e of chunks) {
-  if (e.name === "PipelineReporter" && e.ph === "b" && e.args && e.args.chrome_frame_reporter) {
-    const s = e.args.chrome_frame_reporter.state || "unknown";
-    states[s] = (states[s] || 0) + 1;
-  }
-}
 const traceFile = `${out}/trace-${kind}-4x-cpu.json`;
 writeFileSync(traceFile, JSON.stringify({ traceEvents: chunks }));
-const result = { url, kind, cpuThrottle: "4x", qualityTierStart: tier, qualityTierEnd: tierAfter, scrollSeconds: DURATION, ...stats, compositorFrames: states, traceFile };
+const result = { url, kind, cpuThrottle: "4x", qualityTierStart: tier, qualityTierEnd: tierAfter, scrollSeconds: DURATION, ...stats, worstInteractionMs: inpMs, interactionsOver16ms: events.length, chessComLookupWorked: lookupOk, traceFile };
 writeFileSync(`${out}/perf-${kind}.json`, JSON.stringify(result, null, 2));
 console.log(JSON.stringify(result, null, 2));
 await browser.close();
