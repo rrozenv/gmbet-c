@@ -1,4 +1,5 @@
 import {
+  ACESFilmicToneMapping,
   AdditiveBlending,
   BackSide,
   BufferAttribute,
@@ -122,8 +123,9 @@ void main() {
   float night = 1.0 - smoothstep(-0.10, 0.08, sd);
 
   float luma = dot(dayTex, vec3(0.2126, 0.7152, 0.0722));
-  vec3 dayCol = mix(vec3(luma), dayTex, 0.45) * 0.46 * vec3(0.9, 0.97, 1.1);
-  dayCol = mix(dayCol, vec3(0.78, 0.82, 0.9), cloud * 0.85);
+  vec3 dayCol = mix(vec3(luma), dayTex, 0.5) * vec3(0.9, 0.97, 1.08);
+  dayCol = dayCol / (1.0 + dayCol * 2.2) * 0.42;
+  dayCol = mix(dayCol, vec3(0.16, 0.18, 0.21), cloud * 0.45);
   vec3 nightCol = dayTex * 0.012 + vec3(0.0006, 0.0010, 0.0022);
   nightCol += vec3(0.0022, 0.0030, 0.0050) * cloud;
   vec3 col = mix(nightCol, dayCol * (0.15 + 0.85 * clamp(sd + 0.15, 0.0, 1.0)), dayAmt);
@@ -144,6 +146,8 @@ void main() {
   col += vec3(0.9, 0.35, 0.12) * fres * term * 0.12;
 
   gl_FragColor = vec4(col * uReady + (1.0 - uReady) * vec3(0.002, 0.003, 0.006), 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
 }`;
 
 const atmoVert = /* glsl */ `
@@ -172,6 +176,7 @@ void main() {
   vec3 c = mix(vec3(0.02, 0.05, 0.16), vec3(0.18, 0.42, 1.0), lit);
   c += vec3(1.0, 0.45, 0.15) * exp(-pow(sd / 0.14, 2.0)) * 0.35;
   gl_FragColor = vec4(c * rim * uStrength, 1.0);
+  #include <colorspace_fragment>
 }`;
 
 const arcVert = /* glsl */ `
@@ -197,6 +202,7 @@ void main() {
   float edge = smoothstep(0.0, 0.04, t) * smoothstep(1.0, 0.96, t);
   vec3 c = uColor * (0.5 + 0.9 * uGlow + 3.5 * pulse + 3.0 * tip) * edge;
   gl_FragColor = vec4(c * uOpacity, 1.0);
+  #include <colorspace_fragment>
 }`;
 
 const dotFrag = /* glsl */ `
@@ -211,6 +217,7 @@ void main() {
   float ringR = 0.2 + 0.75 * uPhase;
   float ring = smoothstep(0.03, 0.0, abs(r - ringR)) * (1.0 - uPhase) * 0.8;
   gl_FragColor = vec4(uColor * (core * 4.0 + halo + ring * 1.5) * uOpacity, 1.0);
+  #include <colorspace_fragment>
 }`;
 
 const starVert = /* glsl */ `
@@ -231,6 +238,7 @@ void main() {
   float r = length(gl_PointCoord - 0.5) * 2.0;
   float a = smoothstep(1.0, 0.0, r);
   gl_FragColor = vec4(vec3(0.75, 0.82, 1.0) * vLum * a * uOpacity, 1.0);
+  #include <colorspace_fragment>
 }`;
 
 function arcPoints(a, b, lift) {
@@ -270,7 +278,7 @@ function glowTexture(rgb) {
   return t;
 }
 
-export function createScene({ canvas, stage, base, reducedMotion, S: sharedState, anchors, still, onFirstFrame, onBoardReady }) {
+export function createScene({ canvas, stage, base, reducedMotion, S: sharedState, anchors, still, poster, onFirstFrame, onBoardReady }) {
   const mobileGPU = window.matchMedia("(max-width: 819px), (pointer: coarse)").matches;
   const renderer = new WebGLRenderer({
     canvas,
@@ -284,6 +292,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
   renderer.setClearColor(0x020306, 1);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false;
 
   const scene = new Scene();
   scene.background = new Color(0x020306);
@@ -320,10 +329,11 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
       uLightsGain: { value: 3.2 },
     },
   });
-  earthMat.uniforms.uDay.value = tex("day.jpg", true);
-  earthMat.uniforms.uLights.value = tex("lights.jpg");
-  earthMat.uniforms.uClouds.value = tex("clouds.jpg");
-  earthMat.uniforms.uWater.value = tex("water.jpg");
+  const res = mobileGPU ? "2k" : "4k";
+  earthMat.uniforms.uDay.value = tex(`day-${res}.webp`, true);
+  earthMat.uniforms.uLights.value = tex(`lights-${res}.webp`);
+  earthMat.uniforms.uClouds.value = tex("clouds-2k.webp");
+  earthMat.uniforms.uWater.value = tex("water-2k.webp");
   earth.add(new Mesh(new SphereGeometry(1, 160, 120), earthMat));
 
   const atmo = new Mesh(
@@ -500,92 +510,98 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
 
   let envReady = false;
   let boardReady = false;
-  const pmrem = new PMREMGenerator(renderer);
-  new HDRLoader().load(base + "hdr/studio.hdr", (hdr) => {
-    const env = pmrem.fromEquirectangular(hdr).texture;
-    hdr.dispose();
-    scene.environment = env;
-    scene.environmentIntensity = 0.32;
-    envReady = true;
-  });
+  let boardRequested = false;
+  const loadBoard = () => {
+    if (boardRequested) return;
+    boardRequested = true;
+    const pmrem = new PMREMGenerator(renderer);
+    new HDRLoader().load(base + "hdr/studio.hdr", (hdr) => {
+      const env = pmrem.fromEquirectangular(hdr).texture;
+      hdr.dispose();
+      scene.environment = env;
+      scene.environmentIntensity = 0.32;
+      envReady = true;
+    });
 
-  const gltf = new GLTFLoader();
-  gltf.setMeshoptDecoder(MeshoptDecoder);
-  gltf.load(base + "models/chess.glb", (g) => {
-    const root = g.scene;
-    // Final position before the mate: White Kg1 Qd1 Bb2, pawns a3 f2 g2 h2. Black Kg8 Bb7 Rc2, pawns a7 b6 f7 g7 h7.
-    const want = {
-      piece_king_white: "g1",
-      piece_queen_white: "d1",
-      piece_bishop_white_01: "b2",
-      piece_pawn_white_01: "a3",
-      piece_pawn_white_02: "f2",
-      piece_pawn_white_03: "g2",
-      piece_pawn_white_04: "h2",
-      piece_king_black: "g8",
-      piece_bishop_black_01: "b7",
-      piece_rook_black_01: "c2",
-      piece_pawn_black_01: "a7",
-      piece_pawn_black_02: "b6",
-      piece_pawn_black_03: "f7",
-      piece_pawn_black_04: "g7",
-      piece_pawn_black_05: "h7",
-    };
-    const nodes = [...root.children];
-    const captured = { white: [], black: [] };
-    for (const n of nodes) {
-      n.traverse((o) => {
-        if (o.isMesh) {
-          o.castShadow = n.name !== "board";
-          o.receiveShadow = true;
-          const mat = o.material;
-          if (mat.metalnessMap && !mat.aoMap) {
-            mat.aoMap = mat.metalnessMap;
-            mat.aoMapIntensity = 1;
+    const gltf = new GLTFLoader();
+    gltf.setMeshoptDecoder(MeshoptDecoder);
+    gltf.load(base + "models/chess.glb", (g) => {
+      const root = g.scene;
+      // Final position before the mate: White Kg1 Qd1 Bb2, pawns a3 f2 g2 h2. Black Kg8 Bb7 Rc2, pawns a7 b6 f7 g7 h7.
+      const want = {
+        piece_king_white: "g1",
+        piece_queen_white: "d1",
+        piece_bishop_white_01: "b2",
+        piece_pawn_white_01: "a3",
+        piece_pawn_white_02: "f2",
+        piece_pawn_white_03: "g2",
+        piece_pawn_white_04: "h2",
+        piece_king_black: "g8",
+        piece_bishop_black_01: "b7",
+        piece_rook_black_01: "c2",
+        piece_pawn_black_01: "a7",
+        piece_pawn_black_02: "b6",
+        piece_pawn_black_03: "f7",
+        piece_pawn_black_04: "g7",
+        piece_pawn_black_05: "h7",
+      };
+      const nodes = [...root.children];
+      const captured = { white: [], black: [] };
+      for (const n of nodes) {
+        n.traverse((o) => {
+          if (o.isMesh) {
+            o.castShadow = n.name !== "board";
+            o.receiveShadow = true;
+            const mat = o.material;
+            if (mat.metalnessMap && !mat.aoMap) {
+              mat.aoMap = mat.metalnessMap;
+              mat.aoMapIntensity = 1;
+            }
+            mat.envMapIntensity = n.name === "board" ? 0.9 : 1.2;
+            if (n.name === "board") mat.color.setScalar(0.62);
+            mat.needsUpdate = true;
           }
-          mat.envMapIntensity = n.name === "board" ? 0.9 : 1.2;
-          if (n.name === "board") mat.color.setScalar(0.62);
-          mat.needsUpdate = true;
+        });
+        if (n.name === "board") {
+          n.rotation.y = 0;
+          continue;
         }
-      });
-      if (n.name === "board") {
-        n.rotation.y = 0;
-        continue;
+        // Model squares: x = (f - 3.5) * SQ, z = (r - 4.5) * SQ. Move each piece by the offset to its new square.
+        const of = Math.round(n.position.x / SQ + 3.5);
+        const or = Math.round(n.position.z / SQ + 4.5);
+        const orig = new Vector3((of - 3.5) * SQ, 0, (or - 4.5) * SQ);
+        const target = want[n.name];
+        if (target) {
+          const t = at(target);
+          n.position.x += t.x - orig.x;
+          n.position.z += t.z - orig.z;
+        } else {
+          (n.name.includes("white") ? captured.white : captured.black).push({ n, orig });
+        }
       }
-      // Model squares: x = (f - 3.5) * SQ, z = (r - 4.5) * SQ. Move each piece by the offset to its new square.
-      const of = Math.round(n.position.x / SQ + 3.5);
-      const or = Math.round(n.position.z / SQ + 4.5);
-      const orig = new Vector3((of - 3.5) * SQ, 0, (or - 4.5) * SQ);
-      const target = want[n.name];
-      if (target) {
-        const t = at(target);
-        n.position.x += t.x - orig.x;
-        n.position.z += t.z - orig.z;
-      } else {
-        (n.name.includes("white") ? captured.white : captured.black).push({ n, orig });
-      }
-    }
-    [...captured.white, ...captured.black].forEach(({ n }) => (n.visible = false));
+      [...captured.white, ...captured.black].forEach(({ n }) => (n.visible = false));
 
-    const queen = root.getObjectByName("piece_queen_white");
-    const king = root.getObjectByName("piece_king_black");
-    pieces.queen = queen;
-    pieces.queenBase = queen.position.clone();
-    // Tip the king over the edge of its base, toward h8.
-    const pivot = new Group();
-    const kp = king.position.clone();
-    const baseR = 0.0125;
-    pivot.position.set(kp.x - baseR, 0.0174, kp.z);
-    root.add(pivot);
-    king.position.sub(pivot.position);
-    pivot.add(king);
-    pieces.kingPivot = pivot;
+      const queen = root.getObjectByName("piece_queen_white");
+      const king = root.getObjectByName("piece_king_black");
+      pieces.queen = queen;
+      pieces.queenBase = queen.position.clone();
+      // Tip the king over the edge of its base, toward h8.
+      const pivot = new Group();
+      const kp = king.position.clone();
+      const baseR = 0.0125;
+      pivot.position.set(kp.x - baseR, 0.0174, kp.z);
+      root.add(pivot);
+      king.position.sub(pivot.position);
+      pivot.add(king);
+      pieces.kingPivot = pivot;
 
-    boardRoot.add(root);
-    boardReady = true;
-    boardRoot.visible = true;
-    onBoardReady && onBoardReady();
-  });
+      boardRoot.add(root);
+      boardReady = true;
+      boardRoot.visible = true;
+      onBoardReady && onBoardReady();
+    });
+  };
+  if (still) loadBoard();
 
   /* Orientations */
   const focusQ = (() => {
@@ -698,6 +714,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
   const look = new Vector3();
   const up = new Vector3();
   const focusMat = new Matrix4();
+  const driftQ = new Quaternion();
   const boardMat = new Matrix4();
 
   // Final framing in board space: seated behind White, high enough to see the whole board.
@@ -709,25 +726,51 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
   let first = true;
   let last = performance.now();
   let clock = 0;
-  let slowFrames = 0;
-  let frames = 0;
 
-  const frame = (now) => {
-    requestAnimationFrame(frame);
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
-    if (!state.visible) return;
-    clock += dt;
-    frames += 1;
-    if (frames > 30 && frames < 150 && dt > 0.024) slowFrames += 1;
-    if (frames === 150 && slowFrames > 60 && state.dpr > 1) {
+  // Quality tiers: 2 = depth of field, bloom, grain. 1 = bloom and grain. 0 = no post-processing, pixel ratio 1.
+  // Slow frames step the tier down; it never steps back up, so quality cannot oscillate.
+  const weak = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4;
+  let tier = weak ? 0 : mobileGPU ? 1 : 2;
+  let frameAvg = 1 / 60;
+  let sampled = 0;
+  const applyTier = () => {
+    dofPass.enabled = tier >= 2;
+    if (tier === 0) {
+      renderer.toneMapping = ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
       state.dpr = 1;
       renderer.setPixelRatio(1);
-      composer.setSize(state.w, state.h, false);
+      renderer.setSize(state.w, state.h, false);
+    }
+    stage.dataset.tier = String(tier);
+  };
+  let shadowKey = "";
+
+  let compiled = false;
+  renderer
+    .compileAsync(scene, camera)
+    .catch(() => {})
+    .then(() => (compiled = true));
+
+  const frame = (now) => {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (!compiled || !state.visible || document.hidden) return;
+    clock += dt;
+    if (dt > 0) {
+      frameAvg += (dt - frameAvg) * 0.05;
+      sampled += 1;
+    }
+    if (sampled > 90 && frameAvg > 1 / 48 && tier > 0) {
+      tier -= 1;
+      sampled = 0;
+      frameAvg = 1 / 60;
+      applyTier();
     }
 
     const c = S.cam;
     const dive = smooth(0.0, 0.42, c);
+    if (!boardRequested && (c > 0.001 || clock > 4)) loadBoard();
 
     if (!state.dragging) {
       const auto = reducedMotion ? 0 : 0.02 * (1 - dive);
@@ -745,7 +788,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
 
     const { w, h, mobile } = state;
     const t = Math.tan((FOV / 2) * DEG);
-    const heroD = mobile ? Math.min(w * 1.12, h * 0.62) : Math.min(h * 0.94, w * 0.6);
+    const heroD = poster ? h * 0.8 : mobile ? Math.min(w * 1.12, h * 0.62) : Math.min(h * 0.94, w * 0.6);
     const d0 = Math.sqrt(1 + Math.pow(h / heroD / t, 2));
 
     // Board frame as it will be once the globe has turned to its focus orientation.
@@ -754,7 +797,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
     boardMat.multiplyMatrices(focusMat, boardRoot.matrix);
     B.setFromMatrixPosition(boardMat);
     {
-      const frac = mobile ? 0.94 : 0.6;
+      const frac = mobile ? 0.94 : 0.68;
       const aspect = w / h;
       const dWorld = BOARD_WORLD / (frac * 2 * t * Math.min(aspect, 1.15));
       CAM_BOARD.copy(mobile ? CAM_DIR_PHONE : CAM_DIR_DESK).multiplyScalar(dWorld / boardScale);
@@ -777,15 +820,22 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
     camera.position.copy(B).addScaledVector(dirT, dist);
     const lookT = smooth(0.0, 0.7, c);
     look.set(0, 0, 0).lerp(lookFinal, lookT);
+    // Slow orbit and push-in while the match plays, so the board never sits still.
+    const settle = smooth(0.85, 1.0, c);
+    if (settle > 0 && !still) {
+      const ang = (S.drift - 0.5) * 0.32 * settle;
+      driftQ.setFromAxisAngle(boardUp, ang);
+      camera.position.sub(lookFinal).applyQuaternion(driftQ).multiplyScalar(1 - 0.09 * S.drift * settle).add(lookFinal);
+    }
     up.set(0, 1, 0).lerp(boardUp, smooth(0.3, 1.0, c)).normalize();
     camera.up.copy(up);
     camera.lookAt(look);
     camera.near = Math.max(0.004, dist * 0.04);
     camera.far = dist + 6;
 
-    const hx = mobile ? w * 0.5 : w * 0.67;
-    const hy = mobile ? h * 0.36 : h * 0.52;
-    const fx = mobile ? w * 0.5 : w * 0.64;
+    const hx = poster || mobile ? w * 0.5 : w * 0.67;
+    const hy = poster ? h * 0.5 : mobile ? h * 0.36 : h * 0.52;
+    const fx = mobile ? w * 0.5 : w * 0.655;
     const fy = mobile ? h * 0.53 : h * 0.55;
     const off = smooth(0.0, 0.6, c);
     const cx = lerp(hx, fx, off);
@@ -810,18 +860,18 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
     dof.cocMaterial.copyCameraSettings(camera);
     dof.cocMaterial.focusRange = lerp(3, 0.16, smooth(0.6, 1.0, c)) * (1 - 0.8 * S.win);
     dof.bokehScale = lerp(0, mobile ? 2.5 : 3.5, smooth(0.55, 0.95, c)) + S.win * 3;
-    dofPass.enabled = c > 0.5;
+    dofPass.enabled = tier >= 2 && c > 0.5;
 
     starMat.uniforms.uOpacity.value = 0.8;
     const intro = reducedMotion ? 1 : smooth(0.4, 2.4, clock);
     const m = main.material.uniforms;
-    m.uDraw.value = intro;
+    m.uDraw.value = poster ? 0 : intro;
     m.uHead.value = reducedMotion ? -1 : ((clock * 0.3) % 1.5) - 0.25;
     m.uGlow.value = dive;
     m.uOpacity.value = 1 - smooth(0.55, 0.9, c) * 0.82;
     dots.forEach((d, i) => {
       d.material.uniforms.uPhase.value = reducedMotion ? 0.6 : (clock * 0.5 + i * 0.5) % 1;
-      d.material.uniforms.uOpacity.value = intro;
+      d.material.uniforms.uOpacity.value = poster ? 0 : intro;
     });
     previews.forEach((pv) => {
       const cyc = 17.1;
@@ -830,7 +880,7 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
       const u = pv.arc.material.uniforms;
       u.uDraw.value = smooth(0, 1.6, tt);
       u.uHead.value = lerp(-0.2, 1.2, smooth(0.8, 4.2, tt));
-      u.uOpacity.value = vis * 0.8 * (1 - dive);
+      u.uOpacity.value = poster ? 0 : vis * 0.8 * (1 - dive);
       pv.dots.forEach((d) => {
         d.material.uniforms.uOpacity.value = vis * (1 - dive);
         d.material.uniforms.uPhase.value = (tt * 0.45) % 1;
@@ -889,16 +939,27 @@ export function createScene({ canvas, stage, base, reducedMotion, S: sharedState
       place(anchors.bottom, -0.3, false);
     }
 
-    composer.render(dt);
+    const key = boardRoot.visible ? `${boardIn.toFixed(3)}|${S.move.toFixed(3)}|${S.tip.toFixed(3)}` : "off";
+    if (key !== shadowKey) {
+      shadowKey = key;
+      renderer.shadowMap.needsUpdate = boardRoot.visible;
+    }
+
+    if (tier === 0) renderer.render(scene, camera);
+    else composer.render(dt);
     if (first) {
       first = false;
       onFirstFrame && onFirstFrame();
     }
   };
-  requestAnimationFrame(frame);
+  applyTier();
 
   return {
     S,
+    tick: frame,
+    get tier() {
+      return tier;
+    },
     setVisible(v) {
       state.visible = v;
     },

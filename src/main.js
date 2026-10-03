@@ -16,9 +16,11 @@ const BASE = import.meta.env.BASE_URL;
 const params = new URLSearchParams(location.search);
 const stillMode = params.has("still");
 const ogMode = params.has("og");
-const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches || stillMode || ogMode;
+const posterMode = params.has("poster");
+const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches || stillMode || ogMode || posterMode;
 if (stillMode) document.documentElement.classList.add("still");
 if (ogMode) document.documentElement.classList.add("og");
+if (posterMode) document.documentElement.classList.add("still", "poster");
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
@@ -48,9 +50,13 @@ if (!reduced) {
   lenis = new Lenis({ lerp: 0.085, wheelMultiplier: 0.9, touchMultiplier: 1.2 });
   lenis.on("scroll", ScrollTrigger.update);
   window.lenis = lenis;
-  gsap.ticker.add((t) => lenis.raf(t * 1000));
-  gsap.ticker.lagSmoothing(0);
 }
+// One requestAnimationFrame loop for everything: Lenis, ScrollTrigger (via Lenis), the timeline, and the WebGL frame.
+gsap.ticker.lagSmoothing(0);
+gsap.ticker.add((t) => {
+  if (lenis) lenis.raf(t * 1000);
+  if (world.tick) world.tick(performance.now());
+});
 document.querySelectorAll('a[href^="#"]').forEach((a) => {
   a.addEventListener("click", (e) => {
     const id = a.getAttribute("href");
@@ -65,7 +71,7 @@ document.querySelectorAll('a[href^="#"]').forEach((a) => {
 });
 
 /* The 3D world: globe, arc, and the board at the arc's apex */
-const S0 = { cam: 0, lock: 0, move: 0, check: 0, tip: 0, win: 0 };
+const S0 = { cam: 0, drift: 0, lock: 0, move: 0, check: 0, tip: 0, win: 0 };
 let world = { S: S0 };
 const webgl = (() => {
   try {
@@ -75,7 +81,7 @@ const webgl = (() => {
     return false;
   }
 })();
-if (webgl) {
+const boot = () =>
   import("./scene.js").then(({ createScene, CITIES }) => {
     world = createScene({
       canvas,
@@ -85,19 +91,48 @@ if (webgl) {
       S: S0,
       anchors: { top: $(".hud-top"), bottom: $(".hud-bottom") },
       still: stillMode,
-      onFirstFrame: () => canvas.classList.add("ready"),
+      poster: posterMode,
+      onFirstFrame: () => {
+        canvas.classList.add("ready");
+        stage.classList.add("live");
+      },
     });
     world.addLabel($('[data-city="nyc"]'), CITIES.nyc);
     world.addLabel($('[data-city="seoul"]'), CITIES.seoul);
     new IntersectionObserver(([e]) => world.setVisible(e.isIntersecting), { rootMargin: "64px" }).observe(stage);
-    ScrollTrigger.refresh();
   });
+if (webgl) {
+  // The poster paints first; WebGL boots once the page is idle or the visitor starts to scroll or touch.
+  let booted = false;
+  const go = () => {
+    if (booted) return;
+    booted = true;
+    boot();
+  };
+  const idle = window.requestIdleCallback || ((f) => setTimeout(f, 200));
+  window.addEventListener("load", () => idle(go, { timeout: 2500 }), { once: true });
+  ["pointerdown", "wheel", "touchstart", "keydown"].forEach((ev) => window.addEventListener(ev, go, { once: true, passive: true }));
+  if (stillMode || ogMode || posterMode) go();
 } else {
   document.documentElement.classList.add("no-webgl");
 }
 const S = S0;
 
-/* DOM that follows the scene state */
+/* DOM that follows the scene state. Text is written only when it changes. */
+const last = {};
+const setText = (el, key, v) => {
+  if (last[key] !== v) {
+    last[key] = v;
+    el.textContent = v;
+  }
+};
+const setClass = (el, cls, on) => {
+  const k = cls + (el.dataset.chip || el.className);
+  if (last[k] !== on) {
+    last[k] = on;
+    el.classList.toggle(cls, on);
+  }
+};
 function syncHud() {
   const lockMin = clamp(S.lock * 2);
   const lockYou = clamp(S.lock * 2 - 1);
@@ -107,19 +142,17 @@ function syncHud() {
   if (paid) {
     chipYou.style.opacity = "1";
     chipYou.style.transform = "none";
-    chipYou.classList.add("won");
-    chipYou.textContent = "+$40";
   } else {
     chipYou.style.opacity = String(1 - lockYou);
     chipYou.style.transform = `translate3d(0, ${(8 * lockYou).toFixed(1)}px, 0) scale(${(1 - 0.25 * lockYou).toFixed(3)})`;
-    chipYou.classList.remove("won");
-    chipYou.textContent = "$20";
   }
-  potValue.textContent = "$" + Math.round(20 * lockMin + 20 * lockYou);
-  pot.classList.toggle("locked", S.lock > 0.99 && !paid);
-  pot.classList.toggle("paid", paid);
-  potLabel.textContent = paid ? "Paid to you" : S.lock > 0.99 ? "Pot locked" : "Pot";
-  win.textContent = String(Math.round(40 * clamp(S.win * 1.4)));
+  setClass(chipYou, "won", paid);
+  setText(chipYou, "chip", paid ? "+$40" : "$20");
+  setText(potValue, "pot", "$" + Math.round(20 * lockMin + 20 * lockYou));
+  setClass(pot, "locked", S.lock > 0.99 && !paid);
+  setClass(pot, "paid", paid);
+  setText(potLabel, "potLabel", paid ? "Paid to you" : S.lock > 0.99 ? "Pot locked" : "Pot");
+  setText(win, "win", String(Math.round(40 * clamp(S.win * 1.4))));
 }
 
 /* One timeline, scrubbed by scroll, on a grid of 25 beats (4 units each). Every move starts on a beat or half-beat. */
@@ -131,19 +164,20 @@ function buildTimeline() {
   tl.to(hero, { autoAlpha: 0, y: -40, duration: b(2), ease: "power2.in" }, b(0));
   tl.to(tag, { autoAlpha: 0, duration: b(1) }, b(0));
   tl.to(S, { cam: 1, duration: b(11), ease: "power2.inOut" }, b(1));
-  const lineIn = (el, at) => tl.fromTo(el, { autoAlpha: 0, y: 24, filter: "blur(8px)" }, { autoAlpha: 1, y: 0, filter: "blur(0px)", duration: b(1), ease: "power3.out" }, at);
-  const lineOut = (el, at) => tl.to(el, { autoAlpha: 0, y: -24, filter: "blur(8px)", duration: b(1), ease: "power2.in" }, at);
+  const lineIn = (el, at) => tl.fromTo(el, { autoAlpha: 0, y: 24, scale: 0.98 }, { autoAlpha: 1, y: 0, scale: 1, duration: b(1), ease: "power3.out" }, at);
+  const lineOut = (el, at) => tl.to(el, { autoAlpha: 0, y: -24, scale: 1.02, duration: b(1), ease: "power2.in" }, at);
   lineIn(lines[0], b(3));
   lineOut(lines[0], b(5));
   lineIn(lines[1], b(6));
   lineOut(lines[1], b(9));
 
+  tl.to(S, { drift: 1, duration: b(14), ease: "none" }, b(11));
   tl.set(hud, { autoAlpha: 1 }, b(11));
   tl.fromTo(".hud-player", { autoAlpha: 0, y: 12 }, { autoAlpha: 1, y: 0, duration: b(1), stagger: b(0.5), ease: "power3.out" }, b(11));
   tl.fromTo([".eyebrow", ".pot", ".steps"], { autoAlpha: 0, y: 16 }, { autoAlpha: 1, y: 0, duration: b(1), stagger: b(0.5), ease: "power3.out" }, b(12));
 
-  const capIn = (i, at) => tl.fromTo(caps[i], { autoAlpha: 0, y: 24, filter: "blur(10px)" }, { autoAlpha: 1, y: 0, filter: "blur(0px)", duration: b(1), ease: "power3.out" }, at);
-  const capOut = (i, at) => tl.to(caps[i], { autoAlpha: 0, y: -24, filter: "blur(10px)", duration: b(0.5), ease: "power2.in" }, at);
+  const capIn = (i, at) => tl.fromTo(caps[i], { autoAlpha: 0, y: 24 }, { autoAlpha: 1, y: 0, duration: b(1), ease: "power3.out" }, at);
+  const capOut = (i, at) => tl.to(caps[i], { autoAlpha: 0, y: -24, duration: b(0.5), ease: "power2.in" }, at);
   capIn(0, b(12));
   capOut(0, b(14.5));
   capIn(1, b(15));
@@ -157,7 +191,7 @@ function buildTimeline() {
 
   tl.to([".hud-side", ".hud-player"], { autoAlpha: 0, duration: b(0.5) }, b(21.5));
   tl.to(S, { win: 1, duration: b(1.5), ease: "power2.out" }, b(22));
-  tl.fromTo(payout, { autoAlpha: 0, scale: 0.9, filter: "blur(24px)" }, { autoAlpha: 1, scale: 1, filter: "blur(0px)", duration: b(1.5), ease: "expo.out" }, b(22));
+  tl.fromTo(payout, { autoAlpha: 0, scale: 0.86 }, { autoAlpha: 1, scale: 1, duration: b(1.5), ease: "expo.out" }, b(22));
 
   const segs = [
     [12, 15],
@@ -165,15 +199,15 @@ function buildTimeline() {
     [18, 21.5],
     [22, 24],
   ];
-  segs.forEach(([x, y], i) => tl.fromTo(steps[i], { "--f": "0%" }, { "--f": "100%", duration: b(y - x) }, b(x)));
+  segs.forEach(([x, y], i) => tl.fromTo(steps[i].firstElementChild, { scaleX: 0 }, { scaleX: 1, duration: b(y - x) }, b(x)));
   return tl;
 }
 
 const tl = buildTimeline();
 if (stillMode) {
-  Object.assign(S, { cam: 1, lock: 1, move: 1, check: 1, tip: 1, win: 0 });
+  Object.assign(S, { cam: 1, drift: 0.5, lock: 1, move: 1, check: 1, tip: 1, win: 0 });
 }
-if (stillMode || ogMode) {
+if (stillMode || ogMode || posterMode) {
   // Asset renders: no scroll binding.
 } else if (!reduced) {
   ScrollTrigger.create({
@@ -204,6 +238,89 @@ $("[data-jump]").addEventListener("click", (e) => {
   if (lenis) lenis.scrollTo(top, { duration: 3.2, easing: (t) => 1 - Math.pow(1 - t, 3) });
   else window.scrollTo(0, top);
 });
+
+/* Live Chess.com lookup from the public API (client side). Nothing is stored. */
+(() => {
+  const form = $("[data-lookup]");
+  const out = $("[data-lookup-out]");
+  const input = form.querySelector("input");
+  const button = form.querySelector("button");
+  const USER = /^[A-Za-z0-9_-]{3,25}$/;
+  const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+  const say = (html) => (out.innerHTML = html);
+  const getJSON = (url, signal) => fetch(url, { signal, headers: { Accept: "application/json" } }).then((r) => {
+    if (r.status === 404) throw Object.assign(new Error("not found"), { notFound: true });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  });
+  const pickMode = (stats) => {
+    const modes = [
+      ["chess_blitz", "Blitz"],
+      ["chess_rapid", "Rapid"],
+      ["chess_bullet", "Bullet"],
+      ["chess_daily", "Daily"],
+    ]
+      .map(([k, label]) => {
+        const m = stats[k];
+        if (!m || !m.last || !m.record) return null;
+        const r = m.record;
+        return { label, rating: m.last.rating, win: r.win || 0, loss: r.loss || 0, draw: r.draw || 0, games: (r.win || 0) + (r.loss || 0) + (r.draw || 0) };
+      })
+      .filter(Boolean);
+    return modes.sort((x, y) => y.games - x.games)[0] || null;
+  };
+  let ctrl = null;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const u = input.value.trim().replace(/^@/, "");
+    if (!USER.test(u)) {
+      say('<p class="lookup-msg err">Chess.com usernames are 3 to 25 letters, numbers, dashes, or underscores.</p>');
+      input.focus();
+      return;
+    }
+    if (ctrl) ctrl.abort();
+    ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    button.disabled = true;
+    say('<p class="lookup-msg">Looking up <b>' + esc(u) + "</b> on Chess.com…</p>");
+    try {
+      const base = "https://api.chess.com/pub/player/" + encodeURIComponent(u.toLowerCase());
+      const [profile, stats] = await Promise.all([getJSON(base, ctrl.signal), getJSON(base + "/stats", ctrl.signal).catch(() => ({}))]);
+      const mode = pickMode(stats);
+      const country = (profile.country || "").split("/").pop();
+      const name = profile.username || u;
+      const avatar = profile.avatar
+        ? '<img class="me-avatar" src="' + esc(profile.avatar) + '" width="48" height="48" alt="" referrerpolicy="no-referrer" />'
+        : '<span class="me-avatar me-initial" aria-hidden="true">' + esc(name[0].toUpperCase()) + "</span>";
+      const title = profile.title ? '<span class="me-title">' + esc(profile.title) + "</span>" : "";
+      const sub = [profile.name, country].filter(Boolean).map(esc).join(" · ");
+      const statsHtml = mode
+        ? '<dl class="me-stats num"><div><dt>' + esc(mode.label) + "</dt><dd>" + esc(mode.rating) + "</dd></div><div><dt>Record</dt><dd>" + esc(mode.win) + "–" + esc(mode.loss) + "–" + esc(mode.draw) + "</dd></div></dl>"
+        : '<p class="lookup-msg">No rated games yet.</p>';
+      say(
+        '<div class="me">' +
+          '<div class="me-head">' + avatar + '<div class="me-id"><b>' + title + esc(name) + "</b>" + (sub ? "<span>" + sub + "</span>" : "") + "</div></div>" +
+          statsHtml +
+          '<p class="me-ready">This is you? You’re ready to play.</p>' +
+          '<a class="btn btn-primary btn-sm" href="#join" data-claim>Join with this account</a>' +
+        "</div>",
+      );
+      out.querySelector("[data-claim]").addEventListener("click", (ev) => {
+        ev.preventDefault();
+        $('input[name="chess_username"]').value = name;
+        if (lenis) lenis.scrollTo("#join", { duration: 1.4 });
+        else $("#join").scrollIntoView();
+        setTimeout(() => $('input[name="email"]').focus({ preventScroll: true }), lenis ? 1500 : 0);
+      });
+    } catch (err) {
+      if (err.notFound) say('<p class="lookup-msg err">No Chess.com account called <b>' + esc(u) + "</b>. Check the spelling.</p>");
+      else say('<p class="lookup-msg">Chess.com didn’t answer just now. You can still add your username when you join.</p>');
+    } finally {
+      clearTimeout(timer);
+      button.disabled = false;
+    }
+  });
+})();
 
 /* Waitlist: the same Supabase project and functions as the main site. */
 (() => {

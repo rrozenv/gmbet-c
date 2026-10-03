@@ -1,6 +1,7 @@
 // Renders the share-card still, the link preview, and the icons from the running dev server.
 // Usage: node scripts/assets.mjs [base-url]
 import { chromium } from "playwright-core";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 
 const url = process.argv[2] || "http://127.0.0.1:5183/gmbet-c/";
@@ -20,6 +21,8 @@ async function shot(query, viewport, out, wait = 7000, opts = {}) {
 
 await shot("?still", { width: 640, height: 640 }, "public/img/final-board.jpg", 7000, { type: "jpeg", quality: 86 });
 await shot("?og", { width: 1200, height: 630 }, "public/og.png");
+await shot("?poster", { width: 1000, height: 1000 }, "/tmp/globe-poster.png");
+execFileSync("cwebp", ["-quiet", "-q", "78", "/tmp/globe-poster.png", "-o", "public/img/globe-poster.webp"]);
 
 const svg = readFileSync("public/favicon.svg", "utf8");
 for (const [size, name] of [
